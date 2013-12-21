@@ -12,7 +12,7 @@ import akka.util.Timeout
 import scala.concurrent.duration._
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
-import org.reactivecouchbase.{StandaloneLogger, CouchbaseBucket, Couchbase}
+import org.reactivecouchbase.{CouchbaseBucket, Couchbase}
 
 case class Message(payload: Any, eventId: Long = 0L, aggregateId: Long = 0L, timestamp: Long = System.currentTimeMillis(), version: Int = 0) {
   def withId(id: Long): Message = this.copy(eventId = id)
@@ -50,19 +50,20 @@ case class SnapshotState(state: Any)
 trait EventStored extends Actor {
 
   private val couchbaseJournal = CouchbaseEventSourcing(context.system)
+  private val logger = couchbaseJournal.theBucket().driver.logger.logger("EventStoredTrait")
 
   abstract override def receive = {
     case msg: Message => {
-      StandaloneLogger("EventStoredTrait").debug(s"Message : $msg")
+      logger.debug(s"Message : $msg")
       couchbaseJournal.journal.forward(WriteInJournal(msg, self, couchbaseJournal))
     }
     case WrittenInJournal(msg) => {
-      StandaloneLogger("EventStoredTrait").debug(s"Written in journal : $msg")
+      logger.debug(s"Written in journal : $msg")
       super.receive(msg)
       super.receive(msg.payload)
     }
     case Replay(msg, p) => {
-      StandaloneLogger("EventStoredTrait").debug(s"Replay : $msg")
+      logger.debug(s"Replay : $msg")
       super.receive(msg)
       super.receive(msg.payload)
       p.success(())
@@ -75,12 +76,13 @@ trait EventStored extends Actor {
 }
 
 private class CouchbaseJournalActor(bucket: CouchbaseBucket, format: Format[CouchbaseMessage], ec: ExecutionContext) extends Actor {
+  val logger = bucket.driver.logger.logger("CouchbaseJournalActor")
   def receive = {
     case WriteInJournal(msg, to, journal) => {
       val ref = sender
-      StandaloneLogger("CouchbaseJournalActor").debug(s"Write in journal : $msg with replaying : ${journal.replaying.get()}")
+      logger.debug(s"Write in journal : $msg with replaying : ${journal.replaying.get()}")
       if (!journal.replaying.get()) {
-        StandaloneLogger("CouchbaseJournalActor").debug(s"As we're not replaying, actually write in journal : $msg")
+        logger.debug(s"As we're not replaying, actually write in journal : $msg")
         val blobKey = s"eventsourcing-message-${msg.eventId}-${msg.aggregateId}-${msg.timestamp}-blob"
         val dataKey = s"eventsourcing-message-${msg.eventId}-${msg.aggregateId}-${msg.timestamp}-data"
         journal.eventFormatters.get(msg.payload.getClass.getName).map { formatter =>
@@ -88,11 +90,11 @@ private class CouchbaseJournalActor(bucket: CouchbaseBucket, format: Format[Couc
           val dataMsg = CouchbaseMessage(dataKey, blobKey, msg.eventId, msg.aggregateId, msg.timestamp, msg.version, "eventsourcing-message", msg.payload.getClass.getName, blobAsJson)
           Couchbase.set(dataKey, dataMsg)(bucket, format, ec)
             .map(_ => to.tell(WrittenInJournal(msg), ref))(ec)
-            .map(_ => StandaloneLogger("CouchbaseJournalActor").debug(s"Wrote to couchbase : $msg"))(ec)
+            .map(_ => logger.debug(s"Wrote to couchbase : $msg"))(ec)
         }.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${msg.payload.getClass.getName}"))
       }
     }
-    case _ => StandaloneLogger.error("Journal received unexpected message")
+    case _ => logger.error("Journal received unexpected message")
   }
 }
 
