@@ -1,4 +1,4 @@
-ReaciveCouchbase Event Store
+ReactiveCouchbase Event Store
 ===================================
 
 The Couchbase Event store provide a very simple way to store application events. 
@@ -19,7 +19,9 @@ object CartCreated {
 
 object EventSourcingBoostrap {
 
-  lazy val couchbaseES = CouchbaseEventSourcing( ActorSystem("couchbase-es-1"), Couchbase.bucket("es") )
+  lazy val driver = ReactiveCouchbaseDriver()
+
+  lazy val couchbaseES = CouchbaseEventSourcing( ActorSystem("couchbase-es-1"), driver.bucket("es") )
     .registerFormatter(CartCreated.cartCreatedFormat)
 
   def bootstrap() = {
