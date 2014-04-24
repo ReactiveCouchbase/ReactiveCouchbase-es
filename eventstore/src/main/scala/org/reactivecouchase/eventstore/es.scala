@@ -4,7 +4,7 @@ import akka.actor.{ActorSystem, Props, Actor, ActorRef}
 import akka.pattern.ask
 import java.util.concurrent.{TimeUnit, ConcurrentHashMap}
 import scala.concurrent.{Promise, Future, Await, ExecutionContext}
-import play.api.libs.json.{JsSuccess, JsValue, Format, Json}
+import play.api.libs.json._
 import com.couchbase.client.protocol.views.{ComplexKey, Stale, Query}
 import scala.reflect.ClassTag
 import java.util.UUID
@@ -13,6 +13,41 @@ import scala.concurrent.duration._
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
 import org.reactivecouchbase.{CouchbaseBucket, Couchbase}
+import play.api.libs.json.JsSuccess
+import java.io.{ObjectOutputStream, ByteArrayOutputStream, ObjectStreamClass}
+import org.apache.commons.codec.binary.Base64
+
+object Base64Format extends Format[Any] {
+
+  var classloader = this.getClass.getClassLoader
+
+  def deserialize(data: Array[Byte]): Any = {
+    new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(data)) {
+      override protected def resolveClass(desc: ObjectStreamClass) = {
+        Class.forName(desc.getName, false, classloader)
+      }
+    }.readObject()
+  }
+
+  def serialize(obj: Any): Array[Byte] = {
+    val bos: ByteArrayOutputStream = new ByteArrayOutputStream()
+    new ObjectOutputStream(bos).writeObject(obj)
+    bos.toByteArray
+  }
+
+  def reads(json: JsValue): JsResult[Any] = json match {
+    case JsString(str) => {
+      try {
+        JsSuccess(deserialize(Base64.decodeBase64(str)))
+      } catch {
+        case e => JsError(s"Error while deserializing binary slug : ${e.getMessage}")
+      }
+    }
+    case _ => JsError("Error while reading binary slug")
+  }
+
+  def writes(o: Any): JsValue = new JsString(Base64.encodeBase64String(serialize(o)))
+}
 
 case class Message(payload: Any, eventId: Long = 0L, aggregateId: Long = 0L, timestamp: Long = System.currentTimeMillis(), version: Int = 0) {
   def withId(id: Long): Message = this.copy(eventId = id)
@@ -85,13 +120,13 @@ private class CouchbaseJournalActor(bucket: CouchbaseBucket, format: Format[Couc
         logger.debug(s"As we're not replaying, actually write in journal : $msg")
         val blobKey = s"eventsourcing-message-${msg.eventId}-${msg.aggregateId}-${msg.timestamp}-blob"
         val dataKey = s"eventsourcing-message-${msg.eventId}-${msg.aggregateId}-${msg.timestamp}-data"
-        journal.eventFormatters.get(msg.payload.getClass.getName).map { formatter =>
-          val blobAsJson = formatter.asInstanceOf[Format[Any]].writes(msg.payload)
-          val dataMsg = CouchbaseMessage(dataKey, blobKey, msg.eventId, msg.aggregateId, msg.timestamp, msg.version, "eventsourcing-message", msg.payload.getClass.getName, blobAsJson)
-          Couchbase.set(dataKey, dataMsg)(bucket, format, ec)
-            .map(_ => to.tell(WrittenInJournal(msg), ref))(ec)
-            .map(_ => logger.debug(s"Wrote to couchbase : $msg"))(ec)
-        }.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${msg.payload.getClass.getName}"))
+        val formatter = journal.eventFormatters.get(msg.payload.getClass.getName).getOrElse(Base64Format)
+        val blobAsJson = formatter.asInstanceOf[Format[Any]].writes(msg.payload)
+        val dataMsg = CouchbaseMessage(dataKey, blobKey, msg.eventId, msg.aggregateId, msg.timestamp, msg.version, "eventsourcing-message", msg.payload.getClass.getName, blobAsJson)
+        Couchbase.set(dataKey, dataMsg)(bucket, format, ec)
+          .map(_ => to.tell(WrittenInJournal(msg), ref))(ec)
+          .map(_ => logger.debug(s"Wrote to couchbase : $msg"))(ec)
+        //}.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${msg.payload.getClass.getName}"))
       }
     }
     case _ => logger.error("Journal received unexpected message")
@@ -144,19 +179,19 @@ class CouchbaseEventSourcing(system: ActorSystem, bucket: CouchbaseBucket, forma
   }
 
   private def replayEvent(message: CouchbaseMessage): Future[Any] = {
-    eventFormatters.get(message.blobClass).map { formatter =>
-      formatter.reads(message.blob) match {
-        case s: JsSuccess[_] => {
-          val msg = Message(s.get, message.eventId, message.aggregateId, message.timestamp, message.version)
-          Future.sequence(actors.map { actor =>
-            val p = Promise[Unit]
-            actor ! Replay(msg, p)
-            p.future
-          })
-        }
-        case _ => throw new RuntimeException(s"Can't read blob for class ${message.blobClass} : ${Json.stringify(message.blob)}")
+    val formatter = eventFormatters.get(message.blobClass).getOrElse(Base64Format)
+    formatter.reads(message.blob) match {
+      case s: JsSuccess[_] => {
+        val msg = Message(s.get, message.eventId, message.aggregateId, message.timestamp, message.version)
+        Future.sequence[Any, List](actors.map { actor =>
+          val p = Promise[Unit]()
+          actor ! Replay(msg, p)
+          p.future
+        })
       }
-    }.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${message.blobClass}"))
+      case _ => throw new RuntimeException(s"Can't read blob for class ${message.blobClass} : ${Json.stringify(message.blob)}")
+    }
+    //}.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${message.blobClass}"))
   }
 
   def replayAll() = {
@@ -207,18 +242,18 @@ class CouchbaseEventSourcing(system: ActorSystem, bucket: CouchbaseBucket, forma
     bySnapshot.flatMap { view =>
       Couchbase.find[CouchbaseSnapshotState](view)(snapshot(id))(bucket, snapFormat, ec).flatMap { list =>
         list.headOption.map { state =>
-          snapshotFormatters.get(state.blobClass).map { formatter =>
-            formatter.reads(state.blob) match {
-              case s: JsSuccess[_] => {
-                Future.sequence(actors.map { actor =>
-                  actor ? SnapshotState(state)
-                }).map { sequence =>
-                  true
-                }
+          val formatter = snapshotFormatters.get(state.blobClass).getOrElse(Base64Format)
+          formatter.reads(state.blob) match {
+            case s: JsSuccess[_] => {
+              Future.sequence(actors.map { actor =>
+                actor ? SnapshotState(state)
+              }).map { sequence =>
+                true
               }
-              case _ => throw new RuntimeException(s"Can't read blob for class ${state.blobClass} : ${Json.stringify(state.blob)}")
             }
-          }.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${state.blobClass}"))
+            case _ => throw new RuntimeException(s"Can't read blob for class ${state.blobClass} : ${Json.stringify(state.blob)}")
+          }
+          //}.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${state.blobClass}"))
         }.getOrElse(throw new RuntimeException(s"Can't find snapshot with id $id"))
       }
     }
@@ -228,18 +263,18 @@ class CouchbaseEventSourcing(system: ActorSystem, bucket: CouchbaseBucket, forma
     bySnapshotTimestamp.flatMap { view =>
       Couchbase.find[CouchbaseSnapshotState](view)(allUntilDesc(System.currentTimeMillis()))(bucket, snapFormat, ec).flatMap { list =>
         list.headOption.map { state =>
-          snapshotFormatters.get(state.blobClass).map { formatter =>
-            formatter.reads(state.blob) match {
-              case s: JsSuccess[_] => {
-                Future.sequence(actors.map { actor =>
-                  actor ? SnapshotState(state)
-                }).map { sequence =>
-                  true
-                }
+          val formatter = snapshotFormatters.get(state.blobClass).getOrElse(Base64Format)
+          formatter.reads(state.blob) match {
+            case s: JsSuccess[_] => {
+              Future.sequence(actors.map { actor =>
+                actor ? SnapshotState(state)
+              }).map { sequence =>
+                true
               }
-              case _ => throw new RuntimeException(s"Can't read blob for class ${state.blobClass} : ${Json.stringify(state.blob)}")
             }
-          }.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${state.blobClass}"))
+            case _ => throw new RuntimeException(s"Can't read blob for class ${state.blobClass} : ${Json.stringify(state.blob)}")
+          }
+          //}.getOrElse(throw new RuntimeException(s"Can't find formatter for class ${state.blobClass}"))
         }.getOrElse(throw new RuntimeException(s"Can't find snapshot"))
       }
     }
