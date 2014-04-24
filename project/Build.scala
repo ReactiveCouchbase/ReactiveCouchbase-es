@@ -1,5 +1,6 @@
 import sbt._
-import Keys._
+import sbt.Keys._
+import scala.Some
 
 object ApplicationBuild extends Build {
 
@@ -37,7 +38,10 @@ object ApplicationBuild extends Build {
     .settings(
       resolvers += "Typesafe repository" at "http://repo.typesafe.com/typesafe/releases/",
       resolvers += "Spy Repository" at "http://files.couchbase.com/maven2",
+      resolvers += "krasserm at bintray" at "http://dl.bintray.com/krasserm/maven",
       libraryDependencies += "org.reactivecouchbase" %% "reactivecouchbase-core" % "0.2-SNAPSHOT",
+      libraryDependencies += "com.github.krasserm" %% "akka-persistence-testkit" % "0.3" % "test",
+      libraryDependencies += "com.typesafe.akka" %% "akka-persistence-experimental" % "2.3.0",
       organization := "org.reactivecouchbase",
       version := appVersion,
       publishTo <<= local,
