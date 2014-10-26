@@ -4,7 +4,7 @@ import Keys._
 object ApplicationBuild extends Build {
 
   val appName         = "ReactiveCouchbase-es"
-  val appVersion      = "0.3-SNAPSHOT"
+  val appVersion      = "0.3"
   val appScalaVersion = "2.11.1"
   //val appScalaBinaryVersion = "2.10"
   val appScalaCrossVersions = Seq("2.11.1", "2.10.4")
@@ -37,7 +37,7 @@ object ApplicationBuild extends Build {
     .settings(
       resolvers += "Typesafe repository" at "http://repo.typesafe.com/typesafe/releases/",
       resolvers += "Spy Repository" at "http://files.couchbase.com/maven2",
-      libraryDependencies += "org.reactivecouchbase" %% "reactivecouchbase-core" % "0.3-SNAPSHOT",
+      libraryDependencies += "org.reactivecouchbase" %% "reactivecouchbase-core" % "0.3",
       organization := "org.reactivecouchbase",
       version := appVersion,
       publishTo <<= local,
